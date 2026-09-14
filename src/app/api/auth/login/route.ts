@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'يرجى إدخال اسم المستخدم وكلمة المرور' }, { status: 400 });
     }
 
-    const user = await prisma.user.findFirst({
+    let user = await prisma.user.findFirst({
       where: {
         OR: [
           { username: username.trim() },
@@ -31,6 +31,35 @@ export async function POST(req: NextRequest) {
         homeBranch: true,
       },
     });
+
+    // Auto-recovery: If user is not found, check if database is unseeded and auto-seed initial admin
+    if (!user) {
+      const userCount = await prisma.user.count().catch(() => null);
+      if (userCount === 0) {
+        const { ensureDefaultProductionData } = await import('@/lib/init-db');
+        await ensureDefaultProductionData();
+        user = await prisma.user.findFirst({
+          where: {
+            OR: [
+              { username: username.trim() },
+              { email: username.trim() },
+            ],
+          },
+          include: {
+            role: {
+              include: {
+                rolePermissions: {
+                  include: {
+                    permission: true,
+                  },
+                },
+              },
+            },
+            homeBranch: true,
+          },
+        });
+      }
+    }
 
     if (!user) {
       return NextResponse.json({ error: 'اسم المستخدم أو كلمة المرور غير صحيحة' }, { status: 401 });
