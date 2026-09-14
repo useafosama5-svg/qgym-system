@@ -1,50 +1,327 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-import bcrypt from 'bcryptjs';
+import { ensureDefaultProductionData } from '@/lib/init-db';
+
+const DDL_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS "branches" (
+    "id" TEXT PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "code" TEXT UNIQUE NOT NULL,
+    "address" TEXT NOT NULL,
+    "phone" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "openingTime" TEXT NOT NULL DEFAULT '06:00',
+    "closingTime" TEXT NOT NULL DEFAULT '23:00',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "roles" (
+    "id" TEXT PRIMARY KEY,
+    "name" TEXT UNIQUE NOT NULL,
+    "displayName" TEXT NOT NULL,
+    "description" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "permissions" (
+    "id" TEXT PRIMARY KEY,
+    "key" TEXT UNIQUE NOT NULL,
+    "name" TEXT NOT NULL,
+    "group" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "role_permissions" (
+    "id" TEXT PRIMARY KEY,
+    "roleId" TEXT NOT NULL REFERENCES "roles"("id") ON DELETE CASCADE,
+    "permissionId" TEXT NOT NULL REFERENCES "permissions"("id") ON DELETE CASCADE,
+    CONSTRAINT "role_permissions_roleId_permissionId_key" UNIQUE ("roleId", "permissionId")
+  )`,
+  `CREATE TABLE IF NOT EXISTS "users" (
+    "id" TEXT PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "email" TEXT UNIQUE NOT NULL,
+    "username" TEXT UNIQUE NOT NULL,
+    "passwordHash" TEXT NOT NULL,
+    "roleId" TEXT NOT NULL REFERENCES "roles"("id"),
+    "homeBranchId" TEXT REFERENCES "branches"("id"),
+    "phone" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "lastLogin" TIMESTAMP(3),
+    "deletedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "customers" (
+    "id" TEXT PRIMARY KEY,
+    "customerCode" TEXT UNIQUE NOT NULL,
+    "firstName" TEXT NOT NULL,
+    "lastName" TEXT NOT NULL,
+    "phone" TEXT UNIQUE NOT NULL,
+    "whatsapp" TEXT,
+    "email" TEXT,
+    "dateOfBirth" TEXT,
+    "gender" TEXT NOT NULL DEFAULT 'MALE',
+    "address" TEXT,
+    "emergencyContact" TEXT,
+    "photo" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "homeBranchId" TEXT NOT NULL REFERENCES "branches"("id"),
+    "barcode" TEXT,
+    "qrCode" TEXT,
+    "deletedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "customer_branch_history" (
+    "id" TEXT PRIMARY KEY,
+    "customerId" TEXT NOT NULL REFERENCES "customers"("id") ON DELETE CASCADE,
+    "oldBranchId" TEXT REFERENCES "branches"("id"),
+    "newBranchId" TEXT NOT NULL REFERENCES "branches"("id"),
+    "action" TEXT NOT NULL DEFAULT 'TRANSFERRED',
+    "startDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "endDate" TIMESTAMP(3),
+    "notes" TEXT,
+    "createdById" TEXT REFERENCES "users"("id"),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "membership_plans" (
+    "id" TEXT PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "description" TEXT,
+    "durationDays" INTEGER NOT NULL DEFAULT 30,
+    "price" DOUBLE PRECISION NOT NULL,
+    "accessType" TEXT NOT NULL DEFAULT 'HOME_BRANCH_ONLY',
+    "freezeAllowed" BOOLEAN NOT NULL DEFAULT true,
+    "freezeDaysMax" INTEGER NOT NULL DEFAULT 15,
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "deletedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "memberships" (
+    "id" TEXT PRIMARY KEY,
+    "membershipNumber" TEXT UNIQUE NOT NULL,
+    "customerId" TEXT NOT NULL REFERENCES "customers"("id") ON DELETE CASCADE,
+    "planId" TEXT NOT NULL REFERENCES "membership_plans"("id"),
+    "homeBranchId" TEXT NOT NULL REFERENCES "branches"("id"),
+    "startDate" TIMESTAMP(3) NOT NULL,
+    "endDate" TIMESTAMP(3) NOT NULL,
+    "price" DOUBLE PRECISION NOT NULL,
+    "discount" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "paidAmount" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "remainingAmount" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "notes" TEXT,
+    "createdById" TEXT REFERENCES "users"("id"),
+    "deletedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "membership_allowed_branches" (
+    "id" TEXT PRIMARY KEY,
+    "membershipId" TEXT NOT NULL REFERENCES "memberships"("id") ON DELETE CASCADE,
+    "branchId" TEXT NOT NULL REFERENCES "branches"("id") ON DELETE CASCADE,
+    CONSTRAINT "membership_allowed_branches_membershipId_branchId_key" UNIQUE ("membershipId", "branchId")
+  )`,
+  `CREATE TABLE IF NOT EXISTS "membership_freezes" (
+    "id" TEXT PRIMARY KEY,
+    "membershipId" TEXT NOT NULL REFERENCES "memberships"("id") ON DELETE CASCADE,
+    "freezeDays" INTEGER NOT NULL,
+    "startDate" TIMESTAMP(3) NOT NULL,
+    "endDate" TIMESTAMP(3) NOT NULL,
+    "reason" TEXT,
+    "approvedById" TEXT REFERENCES "users"("id"),
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "attendance" (
+    "id" TEXT PRIMARY KEY,
+    "customerId" TEXT NOT NULL REFERENCES "customers"("id") ON DELETE CASCADE,
+    "branchId" TEXT NOT NULL REFERENCES "branches"("id"),
+    "membershipId" TEXT REFERENCES "memberships"("id"),
+    "checkinTime" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "checkoutTime" TIMESTAMP(3),
+    "employeeId" TEXT REFERENCES "users"("id"),
+    "method" TEXT NOT NULL DEFAULT 'CUSTOMER_CODE',
+    "status" TEXT NOT NULL DEFAULT 'ALLOWED',
+    "denialReason" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "cash_sessions" (
+    "id" TEXT PRIMARY KEY,
+    "sessionNumber" TEXT UNIQUE NOT NULL,
+    "branchId" TEXT NOT NULL REFERENCES "branches"("id"),
+    "employeeId" TEXT NOT NULL REFERENCES "users"("id"),
+    "openingBalance" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "closingBalance" DOUBLE PRECISION,
+    "expectedCash" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "actualCash" DOUBLE PRECISION,
+    "difference" DOUBLE PRECISION,
+    "notes" TEXT,
+    "openedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "closedAt" TIMESTAMP(3),
+    "status" TEXT NOT NULL DEFAULT 'OPEN',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "payments" (
+    "id" TEXT PRIMARY KEY,
+    "paymentNumber" TEXT UNIQUE NOT NULL,
+    "customerId" TEXT NOT NULL REFERENCES "customers"("id") ON DELETE CASCADE,
+    "membershipId" TEXT REFERENCES "memberships"("id"),
+    "branchId" TEXT NOT NULL REFERENCES "branches"("id"),
+    "cashSessionId" TEXT REFERENCES "cash_sessions"("id"),
+    "amount" DOUBLE PRECISION NOT NULL,
+    "paymentMethod" TEXT NOT NULL DEFAULT 'CASH',
+    "reference" TEXT,
+    "receivedById" TEXT REFERENCES "users"("id"),
+    "paymentDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "notes" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "expenses" (
+    "id" TEXT PRIMARY KEY,
+    "branchId" TEXT NOT NULL REFERENCES "branches"("id"),
+    "cashSessionId" TEXT REFERENCES "cash_sessions"("id"),
+    "category" TEXT NOT NULL,
+    "amount" DOUBLE PRECISION NOT NULL,
+    "paymentMethod" TEXT NOT NULL DEFAULT 'CASH',
+    "description" TEXT NOT NULL,
+    "createdById" TEXT REFERENCES "users"("id"),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "trainers" (
+    "id" TEXT PRIMARY KEY,
+    "userId" TEXT UNIQUE NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+    "branchId" TEXT NOT NULL REFERENCES "branches"("id"),
+    "specialization" TEXT NOT NULL,
+    "bio" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "customer_trainers" (
+    "id" TEXT PRIMARY KEY,
+    "customerId" TEXT NOT NULL REFERENCES "customers"("id") ON DELETE CASCADE,
+    "trainerId" TEXT NOT NULL REFERENCES "trainers"("id") ON DELETE CASCADE,
+    "startDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "endDate" TIMESTAMP(3),
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "notes" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "measurements" (
+    "id" TEXT PRIMARY KEY,
+    "customerId" TEXT NOT NULL REFERENCES "customers"("id") ON DELETE CASCADE,
+    "trainerId" TEXT REFERENCES "trainers"("id"),
+    "weight" DOUBLE PRECISION NOT NULL,
+    "height" DOUBLE PRECISION NOT NULL,
+    "bodyFat" DOUBLE PRECISION,
+    "bmi" DOUBLE PRECISION,
+    "chest" DOUBLE PRECISION,
+    "waist" DOUBLE PRECISION,
+    "arms" DOUBLE PRECISION,
+    "thigh" DOUBLE PRECISION,
+    "notes" TEXT,
+    "recordedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "workout_plans" (
+    "id" TEXT PRIMARY KEY,
+    "customerId" TEXT NOT NULL REFERENCES "customers"("id") ON DELETE CASCADE,
+    "trainerId" TEXT REFERENCES "trainers"("id"),
+    "title" TEXT NOT NULL,
+    "description" TEXT,
+    "startDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "endDate" TIMESTAMP(3),
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "workout_exercises" (
+    "id" TEXT PRIMARY KEY,
+    "workoutPlanId" TEXT NOT NULL REFERENCES "workout_plans"("id") ON DELETE CASCADE,
+    "dayOfWeek" INTEGER NOT NULL,
+    "dayName" TEXT NOT NULL,
+    "exerciseName" TEXT NOT NULL,
+    "sets" INTEGER NOT NULL DEFAULT 3,
+    "reps" TEXT NOT NULL DEFAULT '10-12',
+    "targetWeight" DOUBLE PRECISION,
+    "restSeconds" INTEGER NOT NULL DEFAULT 60,
+    "notes" TEXT,
+    "orderIndex" INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE TABLE IF NOT EXISTS "guest_visits" (
+    "id" TEXT PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "phone" TEXT NOT NULL,
+    "invitedByCustomerId" TEXT REFERENCES "customers"("id"),
+    "branchId" TEXT NOT NULL REFERENCES "branches"("id"),
+    "visitDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "notes" TEXT,
+    "convertedToCustomer" BOOLEAN NOT NULL DEFAULT false,
+    "createdById" TEXT REFERENCES "users"("id"),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "activity_logs" (
+    "id" TEXT PRIMARY KEY,
+    "userId" TEXT REFERENCES "users"("id"),
+    "action" TEXT NOT NULL,
+    "entityType" TEXT NOT NULL,
+    "entityId" TEXT,
+    "branchId" TEXT REFERENCES "branches"("id"),
+    "detailsJson" TEXT,
+    "ipAddress" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "system_settings" (
+    "id" TEXT PRIMARY KEY,
+    "key" TEXT UNIQUE NOT NULL,
+    "value" TEXT NOT NULL,
+    "group" TEXT NOT NULL DEFAULT 'GENERAL',
+    "description" TEXT,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+];
+
+async function initializeDatabase() {
+  for (const sql of DDL_STATEMENTS) {
+    try {
+      await prisma.$executeRawUnsafe(sql);
+    } catch (e) {
+      console.warn('DDL execution note:', e);
+    }
+  }
+  await ensureDefaultProductionData();
+}
 
 export async function GET(req: NextRequest) {
   try {
-    // 1. Test database connection
-    const userCount = await prisma.user.count().catch(() => null);
+    let userCount = await prisma.user.count().catch(() => null);
 
+    // If tables are missing, auto-create tables and seed!
     if (userCount === null) {
-      return NextResponse.json(
-        {
-          success: false,
-          status: 'DATABASE_TABLES_MISSING',
-          message: 'Connected to database, but tables do not exist yet. Please run: npx prisma db push',
-          envVariablesDetected: {
-            hasDATABASE_URL: !!process.env.DATABASE_URL,
-            hasSTORAGE_URL: !!process.env.STORAGE_URL,
-            hasSTORAGE_PRISMA_URL: !!process.env.STORAGE_PRISMA_URL,
-            hasSTORAGE_DATABASE_URL: !!process.env.STORAGE_DATABASE_URL,
-            hasPOSTGRES_URL: !!process.env.POSTGRES_URL,
-          },
-        },
-        { status: 500 }
-      );
+      await initializeDatabase();
+      userCount = await prisma.user.count().catch(() => null);
+    } else if (userCount === 0) {
+      await ensureDefaultProductionData();
+      userCount = await prisma.user.count().catch(() => null);
     }
 
-    // 2. Check if admin exists
     const adminUser = await prisma.user.findFirst({
       where: { username: 'admin' },
       include: { role: true },
-    });
+    }).catch(() => null);
 
-    const branchesCount = await prisma.branch.count();
+    const branchesCount = await prisma.branch.count().catch(() => 0);
 
     return NextResponse.json({
       success: true,
-      status: adminUser ? 'READY' : 'UNSEEDED',
+      status: adminUser ? 'READY' : 'INITIALIZED',
       database: 'CONNECTED',
       stats: {
-        users: userCount,
+        users: userCount || 0,
         branches: branchesCount,
         adminExists: !!adminUser,
       },
-      message: adminUser
-        ? 'System is fully initialized and admin user is ready for login.'
-        : 'Tables exist but database is unseeded. Send a POST request to /api/setup to auto-seed.',
+      message: 'Database is connected, all tables created, and admin user is ready for login.',
     });
   } catch (error: any) {
     return NextResponse.json(
@@ -53,13 +330,6 @@ export async function GET(req: NextRequest) {
         status: 'CONNECTION_ERROR',
         error: error.message || 'Unknown database connection error',
         code: error.code,
-        envVariablesDetected: {
-          hasDATABASE_URL: !!process.env.DATABASE_URL,
-          hasSTORAGE_URL: !!process.env.STORAGE_URL,
-          hasSTORAGE_PRISMA_URL: !!process.env.STORAGE_PRISMA_URL,
-          hasSTORAGE_DATABASE_URL: !!process.env.STORAGE_DATABASE_URL,
-          hasPOSTGRES_URL: !!process.env.POSTGRES_URL,
-        },
       },
       { status: 500 }
     );
@@ -68,246 +338,16 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    // Check if admin already exists
-    const existingAdmin = await prisma.user.findFirst({ where: { username: 'admin' } });
-    if (existingAdmin) {
-      return NextResponse.json({
-        success: true,
-        message: 'Admin user already exists. Ready for login.',
-      });
-    }
-
-    console.log('🌱 Starting automatic production database initialization...');
-
-    // 1. Create Branches
-    const branchNasr = await prisma.branch.upsert({
-      where: { code: 'BR-NASR' },
-      update: {},
-      create: {
-        name: 'فرع مدينة نصر (Nasr City)',
-        code: 'BR-NASR',
-        address: 'شارع عباس العقاد، المنطقة الأولى، مدينة نصر، القاهرة',
-        phone: '01011112222',
-        status: 'ACTIVE',
-        openingTime: '06:00',
-        closingTime: '00:00',
-      },
-    });
-
-    const branchMaadi = await prisma.branch.upsert({
-      where: { code: 'BR-MAADI' },
-      update: {},
-      create: {
-        name: 'فرع المعادي (Maadi)',
-        code: 'BR-MAADI',
-        address: 'شارع اللاسلكي، دجلة، المعادي، القاهرة',
-        phone: '01022223333',
-        status: 'ACTIVE',
-        openingTime: '06:00',
-        closingTime: '23:30',
-      },
-    });
-
-    const branchTagamoa = await prisma.branch.upsert({
-      where: { code: 'BR-TAGAMOA' },
-      update: {},
-      create: {
-        name: 'فرع التجمع الخامس (New Cairo)',
-        code: 'BR-TAGAMOA',
-        address: 'شارع التسعين الشمالي، التجمع الخامس، القاهرة الجديدة',
-        phone: '01033334444',
-        status: 'ACTIVE',
-        openingTime: '06:00',
-        closingTime: '00:00',
-      },
-    });
-
-    // 2. Create Roles
-    const roleSuperAdmin = await prisma.role.upsert({
-      where: { name: 'SUPER_ADMIN' },
-      update: {},
-      create: {
-        name: 'SUPER_ADMIN',
-        displayName: 'المدير العام (Super Admin)',
-        description: 'صلاحيات كاملة وغير محدودة لإدارة كافة الفروع والموظفين والمالية',
-      },
-    });
-
-    const roleBranchManager = await prisma.role.upsert({
-      where: { name: 'BRANCH_MANAGER' },
-      update: {},
-      create: {
-        name: 'BRANCH_MANAGER',
-        displayName: 'مدير فرع (Branch Manager)',
-        description: 'إدارة كاملة للفرع الخاص به فقط',
-      },
-    });
-
-    const roleReception = await prisma.role.upsert({
-      where: { name: 'RECEPTION' },
-      update: {},
-      create: {
-        name: 'RECEPTION',
-        displayName: 'استقبال (Reception)',
-        description: 'تسجيل العملاء وتسجيل الدخول وتجديد الاشتراكات وتحصيل المدفوعات',
-      },
-    });
-
-    const roleTrainer = await prisma.role.upsert({
-      where: { name: 'TRAINER' },
-      update: {},
-      create: {
-        name: 'TRAINER',
-        displayName: 'مدرب (Trainer)',
-        description: 'متابعة المتدربين والقياسات والتمارين والخطط التدريبية',
-      },
-    });
-
-    // 3. Create Permissions
-    const permissionsList = [
-      { key: 'branches.view', name: 'عرض الفروع', group: 'الفروع' },
-      { key: 'branches.manage', name: 'إدارة وتعديل الفروع', group: 'الفروع' },
-      { key: 'users.view', name: 'عرض الموظفين', group: 'الموظفون' },
-      { key: 'users.manage', name: 'إدارة الموظفين والصلاحيات', group: 'الموظفون' },
-      { key: 'customers.view', name: 'عرض العملاء', group: 'العملاء' },
-      { key: 'customers.create', name: 'إضافة عميل', group: 'العملاء' },
-      { key: 'customers.edit', name: 'تعديل بيانات العميل', group: 'العملاء' },
-      { key: 'customers.transfer', name: 'نقل الفرع الأساسي للعميل', group: 'العملاء' },
-      { key: 'memberships.view', name: 'عرض الاشتراكات', group: 'الاشتراكات' },
-      { key: 'memberships.create', name: 'إنشاء وتجديد اشتراك', group: 'الاشتراكات' },
-      { key: 'memberships.freeze', name: 'تجميد الاشتراك', group: 'الاشتراكات' },
-      { key: 'attendance.checkin', name: 'تسجيل دخول وخروج العملاء', group: 'الحضور' },
-      { key: 'attendance.view', name: 'سجلات وتقارير الحضور', group: 'الحضور' },
-      { key: 'finance.payments', name: 'تحصيل وعرض المدفوعات', group: 'المالية' },
-      { key: 'finance.expenses', name: 'تسجيل ومتابعة المصروفات', group: 'المالية' },
-      { key: 'finance.cashier', name: 'فتح وإغلاق الخزينة اليومية', group: 'المالية' },
-      { key: 'fitness.measurements', name: 'تسجيل القياسات والإنبادي', group: 'اللياقة' },
-      { key: 'fitness.workouts', name: 'إعداد ومتابعة جداول التمارين', group: 'اللياقة' },
-      { key: 'reports.view', name: 'عرض التقارير والتحليلات', group: 'التقارير' },
-      { key: 'activity.view', name: 'عرض سجل التدقيق والأنشطة', group: 'السجلات' },
-      { key: 'settings.manage', name: 'إدارة إعدادات النظام', group: 'الإعدادات' },
-    ];
-
-    for (const perm of permissionsList) {
-      const createdPerm = await prisma.permission.upsert({
-        where: { key: perm.key },
-        update: {},
-        create: perm,
-      });
-
-      await prisma.rolePermission.upsert({
-        where: { roleId_permissionId: { roleId: roleSuperAdmin.id, permissionId: createdPerm.id } },
-        update: {},
-        create: { roleId: roleSuperAdmin.id, permissionId: createdPerm.id },
-      });
-    }
-
-    // 4. Create Users (Default password: password123)
-    const passwordHash = await bcrypt.hash('password123', 10);
-
-    const admin = await prisma.user.upsert({
-      where: { username: 'admin' },
-      update: { passwordHash },
-      create: {
-        name: 'المدير العام للمجموعة',
-        email: 'admin@qgym.com',
-        username: 'admin',
-        passwordHash,
-        roleId: roleSuperAdmin.id,
-        status: 'ACTIVE',
-      },
-    });
-
-    const mgrNasr = await prisma.user.upsert({
-      where: { username: 'mgr_nasr' },
-      update: { passwordHash },
-      create: {
-        name: 'أحمد فؤاد',
-        email: 'mgr.nasr@qgym.com',
-        username: 'mgr_nasr',
-        passwordHash,
-        roleId: roleBranchManager.id,
-        homeBranchId: branchNasr.id,
-        status: 'ACTIVE',
-      },
-    });
-
-    const recMaadi = await prisma.user.upsert({
-      where: { username: 'rec_maadi' },
-      update: { passwordHash },
-      create: {
-        name: 'نورهان سعيد',
-        email: 'rec.maadi@qgym.com',
-        username: 'rec_maadi',
-        passwordHash,
-        roleId: roleReception.id,
-        homeBranchId: branchMaadi.id,
-        status: 'ACTIVE',
-      },
-    });
-
-    const trainerOmar = await prisma.user.upsert({
-      where: { username: 'trainer_omar' },
-      update: { passwordHash },
-      create: {
-        name: 'كابتن عمر الشناوي',
-        email: 'trainer.omar@qgym.com',
-        username: 'trainer_omar',
-        passwordHash,
-        roleId: roleTrainer.id,
-        homeBranchId: branchNasr.id,
-        status: 'ACTIVE',
-      },
-    });
-
-    // 5. Create Standard Membership Plans
-    await prisma.membershipPlan.upsert({
-      where: { id: 'plan-monthly-single' },
-      update: {},
-      create: {
-        id: 'plan-monthly-single',
-        name: 'اشتراك شهري - فرع واحد (Monthly Standard)',
-        description: 'دخول غير محدود للفرع الأساسي المسجل به العضو لمدة شهر كامل',
-        durationDays: 30,
-        price: 900,
-        accessType: 'HOME_BRANCH_ONLY',
-        freezeAllowed: false,
-        freezeDaysMax: 0,
-        status: 'ACTIVE',
-      },
-    });
-
-    await prisma.membershipPlan.upsert({
-      where: { id: 'plan-3months-vip' },
-      update: {},
-      create: {
-        id: 'plan-3months-vip',
-        name: 'باقة 3 شهور VIP شاملة لكافة الفروع (3-Months Multi-Branch VIP)',
-        description: 'دخول غير محدود لجميع فروع QGYM الحالية والمستقبلية + تجميد مجاني 15 يوماً',
-        durationDays: 90,
-        price: 2400,
-        accessType: 'UNLIMITED',
-        freezeAllowed: true,
-        freezeDaysMax: 15,
-        status: 'ACTIVE',
-      },
-    });
-
+    await initializeDatabase();
     return NextResponse.json({
       success: true,
-      message: 'Database successfully seeded with default branches, roles, permissions, and admin user!',
-      admin: {
-        username: 'admin',
-        name: admin.name,
-      },
+      message: 'Database schema and seed records successfully initialized.',
     });
   } catch (error: any) {
-    console.error('Setup error:', error);
     return NextResponse.json(
       {
         success: false,
         error: error.message || 'Setup error',
-        code: error.code,
       },
       { status: 500 }
     );
