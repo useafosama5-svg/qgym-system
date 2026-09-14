@@ -1,0 +1,513 @@
+// Prisma schema for Multi-Branch QGym Centralized System
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./qgym.db"
+}
+
+model Branch {
+  id          String   @id @default(uuid())
+  name        String
+  code        String   @unique
+  address     String
+  phone       String
+  status      String   @default("ACTIVE") // ACTIVE, INACTIVE
+  openingTime String   @default("06:00")
+  closingTime String   @default("23:00")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users                 User[]
+  customers             Customer[]
+  memberships           Membership[]
+  attendance            Attendance[]
+  payments              Payment[]
+  expenses              Expense[]
+  cashSessions          CashSession[]
+  trainers              Trainer[]
+  guestVisits           GuestVisit[]
+  activityLogs          ActivityLog[]
+  allowedInMemberships  MembershipAllowedBranch[]
+  oldBranchHistories    CustomerBranchHistory[]   @relation("OldBranch")
+  newBranchHistories    CustomerBranchHistory[]   @relation("NewBranch")
+
+  @@map("branches")
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // SUPER_ADMIN, BRANCH_MANAGER, RECEPTION, TRAINER
+  displayName String
+  description String?
+  createdAt   DateTime @default(now())
+
+  users           User[]
+  rolePermissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id        String   @id @default(uuid())
+  key       String   @unique // e.g. "customers.view", "memberships.create", etc.
+  name      String
+  group     String
+  createdAt DateTime @default(now())
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String @id @default(uuid())
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  name         String
+  email        String    @unique
+  username     String    @unique
+  passwordHash String
+  roleId       String
+  homeBranchId String?
+  phone        String?
+  status       String    @default("ACTIVE") // ACTIVE, INACTIVE
+  lastLogin    DateTime?
+  deletedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  role         Role       @relation(fields: [roleId], references: [id])
+  homeBranch   Branch?    @relation(fields: [homeBranchId], references: [id])
+  
+  trainerProfile         Trainer?
+  createdMemberships     Membership[]            @relation("MembershipCreator")
+  processedAttendance    Attendance[]            @relation("EmployeeAttendance")
+  receivedPayments       Payment[]               @relation("PaymentReceiver")
+  cashSessions           CashSession[]           @relation("SessionEmployee")
+  recordedExpenses       Expense[]               @relation("ExpenseCreator")
+  guestVisitsCreated     GuestVisit[]            @relation("GuestVisitCreator")
+  activityLogs           ActivityLog[]
+  approvedFreezes        MembershipFreeze[]      @relation("FreezeApprover")
+  createdBranchHistories CustomerBranchHistory[] @relation("HistoryCreator")
+
+  @@index([roleId])
+  @@index([homeBranchId])
+  @@index([status])
+  @@map("users")
+}
+
+model Customer {
+  id               String    @id @default(uuid())
+  customerCode     String    @unique // e.g. GYM-000101
+  firstName        String
+  lastName         String
+  phone            String    @unique
+  whatsapp         String?
+  email            String?
+  dateOfBirth      String?
+  gender           String    @default("MALE") // MALE, FEMALE
+  address          String?
+  emergencyContact String?
+  photo            String?
+  status           String    @default("ACTIVE") // ACTIVE, INACTIVE, FROZEN
+  homeBranchId     String
+  barcode          String?
+  qrCode           String?
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  homeBranch         Branch                  @relation(fields: [homeBranchId], references: [id])
+  branchHistories    CustomerBranchHistory[]
+  memberships        Membership[]
+  attendance         Attendance[]
+  payments           Payment[]
+  measurements       Measurement[]
+  workoutPlans       WorkoutPlan[]
+  guestVisits        GuestVisit[]
+  trainerAssignments CustomerTrainer[]
+
+  @@index([customerCode])
+  @@index([phone])
+  @@index([homeBranchId])
+  @@index([status])
+  @@index([barcode])
+  @@map("customers")
+}
+
+model CustomerBranchHistory {
+  id          String    @id @default(uuid())
+  customerId  String
+  oldBranchId String?
+  newBranchId String
+  action      String    @default("TRANSFERRED") // TRANSFERRED, CREATED, VISITED
+  startDate   DateTime  @default(now())
+  endDate     DateTime?
+  notes       String?
+  createdById String?
+  createdAt   DateTime  @default(now())
+
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  oldBranch Branch?  @relation("OldBranch", fields: [oldBranchId], references: [id])
+  newBranch Branch   @relation("NewBranch", fields: [newBranchId], references: [id])
+  createdBy User?    @relation("HistoryCreator", fields: [createdById], references: [id])
+
+  @@index([customerId])
+  @@index([newBranchId])
+  @@map("customer_branch_history")
+}
+
+model MembershipPlan {
+  id                    String    @id @default(uuid())
+  name                  String
+  description           String?
+  durationDays          Int       @default(30)
+  price                 Float
+  accessType            String    @default("HOME_BRANCH_ONLY") // UNLIMITED, HOME_BRANCH_ONLY, SELECTED_BRANCHES
+  freezeAllowed         Boolean   @default(true)
+  freezeDaysMax         Int       @default(15)
+  status                String    @default("ACTIVE") // ACTIVE, INACTIVE, ARCHIVED
+  deletedAt             DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  memberships Membership[]
+
+  @@index([status])
+  @@map("membership_plans")
+}
+
+model Membership {
+  id               String    @id @default(uuid())
+  membershipNumber String    @unique // e.g. MEM-2026-001
+  customerId       String
+  planId           String
+  homeBranchId     String
+  startDate        DateTime
+  endDate          DateTime
+  price            Float
+  discount         Float     @default(0)
+  paidAmount       Float     @default(0)
+  remainingAmount  Float     @default(0)
+  status           String    @default("ACTIVE") // ACTIVE, EXPIRED, FROZEN, CANCELLED, PENDING
+  notes            String?
+  createdById      String?
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  customer        Customer                  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  plan            MembershipPlan            @relation(fields: [planId], references: [id])
+  homeBranch      Branch                    @relation(fields: [homeBranchId], references: [id])
+  createdBy       User?                     @relation("MembershipCreator", fields: [createdById], references: [id])
+  allowedBranches MembershipAllowedBranch[]
+  freezes         MembershipFreeze[]
+  payments        Payment[]
+  attendance      Attendance[]
+
+  @@index([customerId])
+  @@index([homeBranchId])
+  @@index([status])
+  @@index([endDate])
+  @@map("memberships")
+}
+
+model MembershipAllowedBranch {
+  id           String @id @default(uuid())
+  membershipId String
+  branchId     String
+
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  branch     Branch     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([membershipId, branchId])
+  @@map("membership_allowed_branches")
+}
+
+model MembershipFreeze {
+  id           String    @id @default(uuid())
+  membershipId String
+  freezeDays   Int
+  startDate    DateTime
+  endDate      DateTime
+  reason       String?
+  approvedById String?
+  status       String    @default("ACTIVE") // ACTIVE, COMPLETED, CANCELLED
+  createdAt    DateTime  @default(now())
+
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  approvedBy User?      @relation("FreezeApprover", fields: [approvedById], references: [id])
+
+  @@index([membershipId])
+  @@index([status])
+  @@map("membership_freezes")
+}
+
+model Attendance {
+  id           String    @id @default(uuid())
+  customerId   String
+  branchId     String
+  membershipId String?
+  checkinTime  DateTime  @default(now())
+  checkoutTime DateTime?
+  employeeId   String?
+  method       String    @default("CUSTOMER_CODE") // CUSTOMER_CODE, PHONE, QR_CODE, BARCODE, RFID
+  status       String    @default("ALLOWED") // ALLOWED, DENIED
+  denialReason String?
+  createdAt    DateTime  @default(now())
+
+  customer   Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  branch     Branch      @relation(fields: [branchId], references: [id])
+  membership Membership? @relation(fields: [membershipId], references: [id])
+  employee   User?       @relation("EmployeeAttendance", fields: [employeeId], references: [id])
+
+  @@index([customerId])
+  @@index([branchId])
+  @@index([checkinTime])
+  @@index([status])
+  @@map("attendance")
+}
+
+model Payment {
+  id            String   @id @default(uuid())
+  paymentNumber String   @unique // e.g. PAY-2026-0001
+  customerId    String
+  membershipId  String?
+  branchId      String
+  cashSessionId String?
+  amount        Float
+  paymentMethod String   @default("CASH") // CASH, VISA, MASTERCARD, INSTAPAY, VODAFONE_CASH, OTHER
+  reference     String?
+  receivedById  String?
+  paymentDate   DateTime @default(now())
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  customer    Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  membership  Membership?  @relation(fields: [membershipId], references: [id])
+  branch      Branch       @relation(fields: [branchId], references: [id])
+  cashSession CashSession? @relation(fields: [cashSessionId], references: [id])
+  receivedBy  User?        @relation("PaymentReceiver", fields: [receivedById], references: [id])
+
+  @@index([customerId])
+  @@index([branchId])
+  @@index([paymentDate])
+  @@index([paymentMethod])
+  @@map("payments")
+}
+
+model CashSession {
+  id             String    @id @default(uuid())
+  sessionNumber  String    @unique // e.g. SES-BR1-20260914-01
+  branchId       String
+  employeeId     String
+  openingBalance Float     @default(0)
+  closingBalance Float?
+  expectedCash   Float     @default(0)
+  actualCash     Float?
+  difference     Float?
+  notes          String?
+  openedAt       DateTime  @default(now())
+  closedAt       DateTime?
+  status         String    @default("OPEN") // OPEN, CLOSED
+  createdAt      DateTime  @default(now())
+
+  branch   Branch    @relation(fields: [branchId], references: [id])
+  employee User      @relation("SessionEmployee", fields: [employeeId], references: [id])
+  payments Payment[]
+  expenses Expense[]
+
+  @@index([branchId])
+  @@index([status])
+  @@index([openedAt])
+  @@map("cash_sessions")
+}
+
+model Expense {
+  id            String   @id @default(uuid())
+  branchId      String
+  cashSessionId String?
+  category      String   // UTILITIES, MAINTENANCE, SUPPLIES, SALARIES, CLEANING, MARKETING, OTHER
+  amount        Float
+  paymentMethod String   @default("CASH") // CASH, VISA, INSTAPAY, OTHER
+  description   String
+  createdById   String?
+  createdAt     DateTime @default(now())
+
+  branch      Branch       @relation(fields: [branchId], references: [id])
+  cashSession CashSession? @relation(fields: [cashSessionId], references: [id])
+  createdBy   User?        @relation("ExpenseCreator", fields: [createdById], references: [id])
+
+  @@index([branchId])
+  @@index([createdAt])
+  @@map("expenses")
+}
+
+model Trainer {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  branchId       String
+  specialization String   // BODYBUILDING, FITNESS, CROSSFIT, NUTRITION, REHAB
+  bio            String?
+  status         String   @default("ACTIVE") // ACTIVE, INACTIVE
+  createdAt      DateTime @default(now())
+
+  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch             Branch            @relation(fields: [branchId], references: [id])
+  clients            CustomerTrainer[]
+  measurements       Measurement[]
+  workoutPlans       WorkoutPlan[]
+
+  @@index([branchId])
+  @@index([status])
+  @@map("trainers")
+}
+
+model CustomerTrainer {
+  id         String    @id @default(uuid())
+  customerId String
+  trainerId  String
+  startDate  DateTime  @default(now())
+  endDate    DateTime?
+  status     String    @default("ACTIVE") // ACTIVE, COMPLETED, CANCELLED
+  notes      String?
+  createdAt  DateTime  @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  trainer  Trainer  @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([trainerId])
+  @@map("customer_trainers")
+}
+
+model Measurement {
+  id         String   @id @default(uuid())
+  customerId String
+  trainerId  String?
+  weight     Float    // kg
+  height     Float    // cm
+  bodyFat    Float?   // %
+  bmi        Float?
+  chest      Float?   // cm
+  waist      Float?   // cm
+  arms       Float?   // cm
+  thigh      Float?   // cm
+  notes      String?
+  recordedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  trainer  Trainer? @relation(fields: [trainerId], references: [id])
+
+  @@index([customerId])
+  @@index([recordedAt])
+  @@map("measurements")
+}
+
+model WorkoutPlan {
+  id          String   @id @default(uuid())
+  customerId  String
+  trainerId   String?
+  title       String
+  description String?
+  startDate   DateTime @default(now())
+  endDate     DateTime?
+  status      String   @default("ACTIVE") // ACTIVE, ARCHIVED
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  customer  Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  trainer   Trainer?          @relation(fields: [trainerId], references: [id])
+  exercises WorkoutExercise[]
+
+  @@index([customerId])
+  @@map("workout_plans")
+}
+
+model WorkoutExercise {
+  id            String  @id @default(uuid())
+  workoutPlanId String
+  dayOfWeek     Int     // 1 to 7
+  dayName       String  // "Day 1 - Chest & Triceps"
+  exerciseName  String
+  sets          Int     @default(3)
+  reps          String  @default("10-12")
+  targetWeight  Float?  // kg
+  restSeconds   Int     @default(60)
+  notes         String?
+  orderIndex    Int     @default(0)
+
+  workoutPlan WorkoutPlan @relation(fields: [workoutPlanId], references: [id], onDelete: Cascade)
+
+  @@index([workoutPlanId])
+  @@map("workout_exercises")
+}
+
+model GuestVisit {
+  id                  String   @id @default(uuid())
+  name                String
+  phone               String
+  invitedByCustomerId String?
+  branchId            String
+  visitDate           DateTime @default(now())
+  notes               String?
+  convertedToCustomer Boolean  @default(false)
+  createdById         String?
+  createdAt           DateTime @default(now())
+
+  invitedBy Customer? @relation(fields: [invitedByCustomerId], references: [id])
+  branch    Branch    @relation(fields: [branchId], references: [id])
+  createdBy User?     @relation("GuestVisitCreator", fields: [createdById], references: [id])
+
+  @@index([branchId])
+  @@index([phone])
+  @@map("guest_visits")
+}
+
+model ActivityLog {
+  id          String   @id @default(uuid())
+  userId      String?
+  action      String   // LOGIN, LOGOUT, CREATE, UPDATE, DELETE, PAYMENT, CHECKIN, CHECKOUT, FREEZE, BRANCH_TRANSFER, CASH_CLOSING
+  entityType  String   // CUSTOMER, MEMBERSHIP, PAYMENT, ATTENDANCE, BRANCH, CASH_SESSION, EXPENSE, USER
+  entityId    String?
+  branchId    String?
+  detailsJson String?  // Detailed JSON of changes or parameters
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  user   User?   @relation(fields: [userId], references: [id])
+  branch Branch? @relation(fields: [branchId], references: [id])
+
+  @@index([userId])
+  @@index([branchId])
+  @@index([entityType])
+  @@index([createdAt])
+  @@map("activity_logs")
+}
+
+model SystemSetting {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       String   // JSON or String value
+  group       String   @default("GENERAL") // GENERAL, FINANCE, ATTENDANCE, NOTIFICATIONS
+  description String?
+  updatedAt   DateTime @updatedAt
+
+  @@index([group])
+  @@map("system_settings")
+}
